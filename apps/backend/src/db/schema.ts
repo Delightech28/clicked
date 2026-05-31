@@ -1,5 +1,5 @@
 import { pgTable, text, timestamp, uuid, boolean, integer, pgEnum, numeric, index } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -70,18 +70,18 @@ export const messages = pgTable(
 
 export const tokenTransfers = pgTable('token_transfers', {
   id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id')
+    .notNull()
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  senderId: uuid('sender_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  recipientAddress: text('recipient_address').notNull(),
+  amount: text('amount').notNull(),
+  tokenContractId: text('token_contract_id').notNull(),
   txHash: text('tx_hash').notNull().unique(),
-  ledger: integer('ledger').notNull(),
-  fromAddress: text('from_address').notNull(),
-  toAddress: text('to_address').notNull(),
-  amount: numeric('amount', { precision: 38, scale: 0 }).notNull(),
-  /** Raw memo bytes (hex); the listener decodes this as a message UUID and
-   *  joins to `messages.id` when present. */
-  memoHex: text('memo_hex'),
-  messageId: uuid('message_id').references(() => messages.id, {
-    onDelete: 'set null',
-  }),
-  observedAt: timestamp('observed_at').notNull().defaultNow(),
+  memo: text('memo'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 
 // ─── Relations ────────────────────────────────────────────────────────────────
@@ -90,6 +90,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   wallets: many(wallets),
   memberships: many(conversationMembers),
   messages: many(messages),
+  transfers: many(tokenTransfers),
 }));
 
 export const walletsRelations = relations(wallets, ({ one }) => ({
@@ -99,6 +100,7 @@ export const walletsRelations = relations(wallets, ({ one }) => ({
 export const conversationsRelations = relations(conversations, ({ many }) => ({
   members: many(conversationMembers),
   messages: many(messages),
+  transfers: many(tokenTransfers),
 }));
 
 export const conversationMembersRelations = relations(conversationMembers, ({ one }) => ({
@@ -115,6 +117,17 @@ export const messagesRelations = relations(messages, ({ one }) => ({
     references: [conversations.id],
   }),
   sender: one(users, { fields: [messages.senderId], references: [users.id] }),
+}));
+
+export const tokenTransfersRelations = relations(tokenTransfers, ({ one }) => ({
+  conversation: one(conversations, {
+    fields: [tokenTransfers.conversationId],
+    references: [conversations.id],
+  }),
+  sender: one(users, {
+    fields: [tokenTransfers.senderId],
+    references: [users.id],
+  }),
 }));
 
 // ─── Types ────────────────────────────────────────────────────────────────────

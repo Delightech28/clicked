@@ -59,3 +59,52 @@ usersRouter.get('/:id/presence', async (req: AuthRequest, res) => {
   const online = await isOnline(redis, id);
   res.json({ online });
 });
+
+usersRouter.patch('/me', async (req: AuthRequest, res) => {
+  const userId = req.auth!.userId;
+  const { username, avatarUrl } = req.body;
+
+  const updateData: Partial<typeof users.$inferInsert> = {};
+
+  if (avatarUrl !== undefined) {
+    updateData.avatarUrl = avatarUrl;
+  }
+
+  if (username !== undefined) {
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_]{3,30}$/.test(username)) {
+      res.status(400).json({ error: 'Username must be 3-30 alphanumeric characters and underscores only' });
+      return;
+    }
+
+    // Check conflict
+    const existing = await db.query.users.findFirst({
+      where: eq(users.username, username),
+    });
+    if (existing && existing.id !== userId) {
+      res.status(409).json({ error: 'Username is already taken' });
+      return;
+    }
+
+    updateData.username = username;
+  }
+
+  updateData.updatedAt = new Date();
+
+  try {
+    const [updatedUser] = await db
+      .update(users)
+      .set(updateData)
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!updatedUser) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json(updatedUser);
+  } catch (err) {
+    res.status(409).json({ error: 'Username conflict or database error' });
+  }
+});
+

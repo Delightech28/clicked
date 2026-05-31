@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { IRouter } from 'express';
 import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { conversationMembers, messages } from '../db/schema.js';
+import { conversationMembers, messages, tokenTransfers } from '../db/schema.js';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { redis, CONV_CACHE_TTL, convCacheKey } from '../lib/redis.js';
 
@@ -197,4 +197,103 @@ conversationsRouter.get('/:id/search', async (req: AuthRequest, res) => {
   `);
 
   res.json({ results });
+});
+
+// Save a token transfer for a conversation
+conversationsRouter.post('/:id/transfers', async (req: AuthRequest, res) => {
+  const userId = req.auth!.userId;
+  const conversationId = req.params['id'] as string | undefined;
+
+  if (!conversationId) {
+    res.status(400).json({ error: 'Conversation id is required' });
+    return;
+  }
+
+  // Check membership
+  const membership = await db.query.conversationMembers.findFirst({
+    where: and(
+      eq(conversationMembers.conversationId, conversationId),
+      eq(conversationMembers.userId, userId),
+    ),
+  });
+
+  if (!membership) {
+    res.status(403).json({ error: 'Not a member of this conversation' });
+    return;
+  }
+
+  const recipientAddress = req.body.recipient_address ?? req.body.recipientAddress;
+  const amount = req.body.amount;
+  const tokenContractId = req.body.token_contract_id ?? req.body.tokenContractId;
+  const txHash = req.body.tx_hash ?? req.body.txHash;
+  const memo = req.body.memo;
+
+  if (!recipientAddress || amount === undefined || !tokenContractId || !txHash) {
+    res.status(400).json({ error: 'recipientAddress, amount, tokenContractId, and txHash are required' });
+    return;
+  }
+
+  // Check for duplicate txHash
+  const existing = await db.query.tokenTransfers.findFirst({
+    where: eq(tokenTransfers.txHash, txHash),
+  });
+
+  if (existing) {
+    res.status(409).json({ error: 'Transaction hash already exists' });
+    return;
+  }
+
+  try {
+    const [newTransfer] = await db
+      .insert(tokenTransfers)
+      .values({
+        conversationId,
+        senderId: userId,
+        recipientAddress,
+        amount: String(amount),
+        tokenContractId,
+        txHash,
+        memo: memo ?? null,
+      })
+      .returning();
+
+    res.status(201).json(newTransfer);
+  } catch (err) {
+    res.status(409).json({ error: 'Database conflict or validation error' });
+  }
+});
+
+// List token transfers for a conversation
+conversationsRouter.get('/:id/transfers', async (req: AuthRequest, res) => {
+  const userId = req.auth!.userId;
+  const conversationId = req.params['id'] as string | undefined;
+
+  if (!conversationId) {
+    res.status(400).json({ error: 'Conversation id is required' });
+    return;
+  }
+
+  // Check membership
+  const membership = await db.query.conversationMembers.findFirst({
+    where: and(
+      eq(conversationMembers.conversationId, conversationId),
+      eq(conversationMembers.userId, userId),
+    ),
+  });
+
+  if (!membership) {
+    res.status(403).json({ error: 'Not a member of this conversation' });
+    return;
+  }
+
+  try {
+    const transfers = await db.query.tokenTransfers.findMany({
+      where: eq(tokenTransfers.conversationId, conversationId),
+      orderBy: desc(tokenTransfers.createdAt),
+    });
+
+    res.json(transfers);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve transfers' });
+  }
 });
