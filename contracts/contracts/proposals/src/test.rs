@@ -1,293 +1,179 @@
+//! Tests for the proposals contract (#45).
+//!
+//! Covers every acceptance criterion from the issue:
+//!   - `finalize_proposal` before expiry panics
+//!   - Correct status set based on vote tally
+//!   - `execute_proposal` panics if status is not `Passed`
+//!
+//! Plus the obvious adjacent rules: voting after expiry / re-voting /
+//! double-finalize all panic; the `yes_votes <= no_votes` rule resolves
+//! ties as `Rejected`.
+
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, String};
 
-// ── Mock treasury that records withdrawals ────────────────────────────────────
-
-mod mock_treasury {
-    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
-
-    #[contracttype]
-    pub struct Withdrawal {
-        pub to: Address,
-        pub amount: i128,
-    }
-
-    #[contracttype]
-    enum Key {
-        History,
-    }
-
-    #[contract]
-    pub struct MockTreasury;
-
-    #[contractimpl]
-    impl MockTreasury {
-        pub fn withdraw(env: Env, to: Address, amount: i128) {
-            let mut history: Vec<Withdrawal> =
-                env.storage().persistent().get(&Key::History).unwrap_or(Vec::new(&env));
-            history.push_back(Withdrawal { to, amount });
-            env.storage().persistent().set(&Key::History, &history);
-        }
-
-        pub fn get_withdrawals(env: Env) -> Vec<Withdrawal> {
-            env.storage()
-                .persistent()
-                .get(&Key::History)
-                .unwrap_or(Vec::new(&env))
-        }
-    }
-}
-
-use mock_treasury::{MockTreasuryClient, MockTreasury};
-
-fn setup(env: &Env) -> (Address, Address, Address, Address) {
-    let admin = Address::generate(env);
-    let treasury_id = env.register(MockTreasury, ());
-
-    let contract_id = env.register(ProposalsContract, ());
+fn setup(env: &Env) -> (ProposalsContractClient<'static>, Address, Address, Address, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProposalsContract);
     let client = ProposalsContractClient::new(env, &contract_id);
-    client.initialize(&admin, &treasury_id);
 
-    let proposer = Address::generate(env);
-    let recipient = Address::generate(env);
-    (contract_id, treasury_id, proposer, recipient)
+    let admin = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+
+    client.initialize(&admin);
+    (client, admin, alice, bob, carol)
 }
 
-fn make_proposal(
+fn create_proposal_in(
     env: &Env,
-    client: &ProposalsContractClient,
+    client: &ProposalsContractClient<'static>,
     proposer: &Address,
-    recipient: &Address,
-    duration_secs: u64,
-) -> u32 {
-    client.create_proposal(
-        proposer,
-        &String::from_str(env, "Fund the project"),
-        &1_000,
-        recipient,
-        &duration_secs,
-    )
+    expires_in_secs: u64,
+) -> u64 {
+    let now = env.ledger().timestamp();
+    let desc = String::from_str(env, "fund a community art mural");
+    client.create_proposal(proposer, &desc, &(now + expires_in_secs))
+}
+
+fn advance_time(env: &Env, seconds: u64) {
+    env.ledger().with_mut(|li| {
+        li.timestamp += seconds;
+    });
 }
 
 #[test]
-fn test_initialize() {
+fn create_then_vote_then_pass_then_execute_happy_path() {
     let env = Env::default();
-    let (contract_id, _treasury_id, _proposer, _recipient) = setup(&env);
-    // Verify initialization does not panic and state is set
-    let _ = ProposalsContractClient::new(&env, &contract_id);
+    let (client, _admin, alice, bob, carol) = setup(&env);
+
+    let id = create_proposal_in(&env, &client, &alice, 1_000);
+    client.vote(&alice, &id, &true);
+    client.vote(&bob, &id, &true);
+    client.vote(&carol, &id, &false);
+
+    advance_time(&env, 1_001);
+    let status = client.finalize_proposal(&id);
+    assert_eq!(status, ProposalStatus::Passed);
+
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.yes_votes, 2);
+    assert_eq!(proposal.no_votes, 1);
+    assert_eq!(proposal.status, ProposalStatus::Passed);
+
+    client.execute_proposal(&alice, &id);
+    assert_eq!(client.get_proposal(&id).status, ProposalStatus::Executed);
 }
 
 #[test]
-#[should_panic(expected = "already initialized")]
-fn test_double_initialize_panics() {
+fn finalize_with_more_no_votes_rejects() {
     let env = Env::default();
-    let (contract_id, treasury_id, _proposer, _recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    client.initialize(&admin, &treasury_id);
+    let (client, _admin, alice, bob, carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    client.vote(&alice, &id, &false);
+    client.vote(&bob, &id, &true);
+    client.vote(&carol, &id, &false);
+
+    advance_time(&env, 501);
+    let status = client.finalize_proposal(&id);
+    assert_eq!(status, ProposalStatus::Rejected);
 }
 
 #[test]
-fn test_create_proposal_returns_id() {
+fn finalize_with_a_tie_rejects() {
+    // yes_votes <= no_votes → Rejected, per the issue text.
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
+    let (client, _admin, alice, bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    client.vote(&alice, &id, &true);
+    client.vote(&bob, &id, &false);
 
-    let id0 = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    let id1 = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    assert_eq!(id0, 0);
-    assert_eq!(id1, 1);
+    advance_time(&env, 501);
+    assert_eq!(client.finalize_proposal(&id), ProposalStatus::Rejected);
 }
 
 #[test]
-fn test_approve_vote_increments_yes() {
+fn finalize_with_zero_votes_rejects() {
+    // 0 yes <= 0 no → Rejected; closes the door on a no-quorum win.
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &id, &true);
-
-    let p = client.get_proposal(&id);
-    assert_eq!(p.yes_votes, 1);
-    assert_eq!(p.no_votes, 0);
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    advance_time(&env, 501);
+    assert_eq!(client.finalize_proposal(&id), ProposalStatus::Rejected);
 }
 
 #[test]
-fn test_reject_vote_increments_no() {
+#[should_panic(expected = "cannot finalize before expiry")]
+fn finalize_before_expiry_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &id, &false);
-
-    let p = client.get_proposal(&id);
-    assert_eq!(p.yes_votes, 0);
-    assert_eq!(p.no_votes, 1);
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 1_000);
+    // Don't advance time at all.
+    client.finalize_proposal(&id);
 }
 
 #[test]
-#[should_panic(expected = "already voted")]
-fn test_double_vote_panics() {
+#[should_panic(expected = "proposal already finalized")]
+fn finalize_twice_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &id, &true);
-    client.cast_vote(&voter, &id, &true); // second vote panics
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    advance_time(&env, 501);
+    client.finalize_proposal(&id);
+    client.finalize_proposal(&id);
 }
 
 #[test]
-#[should_panic(expected = "voting period has ended")]
-fn test_vote_after_expiry_panics() {
+#[should_panic(expected = "proposal is not in Passed state")]
+fn execute_when_rejected_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    // Duration of 0 is rejected, so use 1 second then advance the ledger
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-
-    // Advance ledger past the end_time
-    env.ledger().with_mut(|l| l.timestamp += 10);
-
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &id, &true);
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    advance_time(&env, 501);
+    // No votes → Rejected.
+    client.finalize_proposal(&id);
+    client.execute_proposal(&alice, &id);
 }
 
 #[test]
-fn test_execute_passed_proposal_triggers_treasury_withdraw() {
+#[should_panic(expected = "proposal is not in Passed state")]
+fn execute_when_still_active_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-    let treasury = MockTreasuryClient::new(&env, &treasury_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-
-    let voter_a = Address::generate(&env);
-    let voter_b = Address::generate(&env);
-    client.cast_vote(&voter_a, &id, &true);
-    client.cast_vote(&voter_b, &id, &true);
-
-    // Advance past voting period
-    env.ledger().with_mut(|l| l.timestamp += 10);
-
-    client.execute_proposal(&id);
-
-    let withdrawals = treasury.get_withdrawals();
-    assert_eq!(withdrawals.len(), 1);
-    assert_eq!(withdrawals.get(0).unwrap().amount, 1_000);
-
-    let p = client.get_proposal(&id);
-    assert!(p.executed);
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 1_000);
+    // Status is still Active.
+    client.execute_proposal(&alice, &id);
 }
 
 #[test]
-fn test_execute_failed_proposal_no_treasury_call() {
+#[should_panic(expected = "voting window has closed")]
+fn vote_after_expiry_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-    let treasury = MockTreasuryClient::new(&env, &treasury_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-
-    // More no votes than yes votes
-    client.cast_vote(&Address::generate(&env), &id, &false);
-    client.cast_vote(&Address::generate(&env), &id, &false);
-    client.cast_vote(&Address::generate(&env), &id, &true);
-
-    env.ledger().with_mut(|l| l.timestamp += 10);
-
-    client.execute_proposal(&id);
-
-    // Treasury should NOT have been called
-    assert_eq!(treasury.get_withdrawals().len(), 0);
-
-    let p = client.get_proposal(&id);
-    assert!(p.executed);
+    let (client, _admin, alice, bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    advance_time(&env, 600);
+    client.vote(&bob, &id, &true);
 }
 
 #[test]
-#[should_panic(expected = "voting period not yet ended")]
-fn test_execute_before_expiry_panics() {
+#[should_panic(expected = "voter has already voted")]
+fn double_vote_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 3600);
-    client.execute_proposal(&id); // voting still open
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    let id = create_proposal_in(&env, &client, &alice, 500);
+    client.vote(&alice, &id, &true);
+    client.vote(&alice, &id, &false);
 }
 
 #[test]
-#[should_panic(expected = "proposal already executed")]
-fn test_double_execute_panics() {
+#[should_panic(expected = "expires_at must be in the future")]
+fn create_with_past_expiry_panics() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, _treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-    env.ledger().with_mut(|l| l.timestamp += 10);
-    client.execute_proposal(&id);
-    client.execute_proposal(&id); // second execution panics
-}
-
-#[test]
-fn test_tied_vote_does_not_pass() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-    let treasury = MockTreasuryClient::new(&env, &treasury_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-    client.cast_vote(&Address::generate(&env), &id, &true);
-    client.cast_vote(&Address::generate(&env), &id, &false);
-
-    env.ledger().with_mut(|l| l.timestamp += 10);
-    client.execute_proposal(&id);
-
-    // Tie means no_votes == yes_votes, so proposal does NOT pass
-    assert_eq!(treasury.get_withdrawals().len(), 0);
-}
-
-#[test]
-fn test_multiple_voters_tally() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (contract_id, treasury_id, proposer, recipient) = setup(&env);
-    let client = ProposalsContractClient::new(&env, &contract_id);
-    let treasury = MockTreasuryClient::new(&env, &treasury_id);
-
-    let id = make_proposal(&env, &client, &proposer, &recipient, 1);
-
-    for _ in 0..3 {
-        client.cast_vote(&Address::generate(&env), &id, &true);
-    }
-    for _ in 0..2 {
-        client.cast_vote(&Address::generate(&env), &id, &false);
-    }
-
-    let p = client.get_proposal(&id);
-    assert_eq!(p.yes_votes, 3);
-    assert_eq!(p.no_votes, 2);
-
-    env.ledger().with_mut(|l| l.timestamp += 10);
-    client.execute_proposal(&id);
-
-    assert_eq!(treasury.get_withdrawals().len(), 1);
+    let (client, _admin, alice, _bob, _carol) = setup(&env);
+    // expires_at == now → not in the future → panic.
+    let desc = String::from_str(&env, "x");
+    client.create_proposal(&alice, &desc, &env.ledger().timestamp());
 }

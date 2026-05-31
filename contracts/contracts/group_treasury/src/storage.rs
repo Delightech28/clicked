@@ -1,11 +1,9 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address};
 
 #[contracttype]
 pub enum DataKey {
     Admin,
-    TokenContract,
-    ProposalsContract,
-    Members,
+    Token,
 }
 
 #[contracttype]
@@ -19,5 +17,3 @@ pub struct WithdrawEvent {
     pub to: Address,
     pub amount: i128,
 }
-
-pub type MemberList = Vec<Address>;
