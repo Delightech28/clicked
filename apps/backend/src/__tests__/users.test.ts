@@ -3,6 +3,11 @@ import request from 'supertest';
 import express from 'express';
 import { signToken } from '../lib/jwt.js';
 
+const mockReturning = vi.fn();
+const mockWhere = vi.fn(() => ({ returning: mockReturning }));
+const mockSet = vi.fn(() => ({ where: mockWhere }));
+const mockUpdate = vi.fn(() => ({ set: mockSet }));
+
 vi.mock('../db/index.js', () => ({
   db: {
     query: {
@@ -10,6 +15,7 @@ vi.mock('../db/index.js', () => ({
         findFirst: vi.fn(),
       },
     },
+    update: mockUpdate,
   },
 }));
 
@@ -122,3 +128,51 @@ describe('GET /users/:id', () => {
     expect(res.body.wallets[0]).not.toHaveProperty('createdAt');
   });
 });
+
+describe('PATCH /users/me', () => {
+  it('returns 401 when no token is provided', async () => {
+    const res = await request(app).patch('/users/me').send({ username: 'valid_name' });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 400 for invalid username format', async () => {
+    const res = await request(app)
+      .patch('/users/me')
+      .set('Authorization', AUTH_HEADER)
+      .send({ username: 'ab' }); // too short
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Username must be 3-30');
+  });
+
+  it('returns 409 for duplicate username', async () => {
+    vi.mocked(db.query.users.findFirst).mockResolvedValue({ id: 'another-user-id', username: 'conflict' } as any);
+
+    const res = await request(app)
+      .patch('/users/me')
+      .set('Authorization', AUTH_HEADER)
+      .send({ username: 'conflict' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Username is already taken');
+  });
+
+  it('returns 200 and updated user on success', async () => {
+    vi.mocked(db.query.users.findFirst).mockResolvedValue(undefined); // no conflict
+    
+    const mockReturning = vi.fn().mockResolvedValue([{ id: 'auth-user-id', username: 'new_name', avatarUrl: 'new_url' }]);
+    const mockWhere = vi.fn(() => ({ returning: mockReturning }));
+    const mockSet = vi.fn(() => ({ where: mockWhere }));
+    vi.mocked(db.update).mockReturnValue({ set: mockSet } as any);
+
+    const res = await request(app)
+      .patch('/users/me')
+      .set('Authorization', AUTH_HEADER)
+      .send({ username: 'new_name', avatarUrl: 'new_url' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.username).toBe('new_name');
+    expect(res.body.avatarUrl).toBe('new_url');
+  });
+});
+

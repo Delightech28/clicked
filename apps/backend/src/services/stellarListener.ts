@@ -20,7 +20,7 @@
  */
 import { rpc } from '@stellar/stellar-sdk';
 import { db } from '../db/index.js';
-import { tokenTransfers, messages } from '../db/schema.js';
+import { tokenTransfers, messages, conversations, users } from '../db/schema.js';
 import { eq, sql } from 'drizzle-orm';
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
@@ -77,6 +77,9 @@ const consoleLogger = {
  */
 async function defaultPersistEvent(event: StellarTransferEvent): Promise<void> {
   let messageId: string | null = null;
+  let conversationId: string | null = null;
+  let senderId: string | null = null;
+
   if (event.memoHex) {
     try {
       const memo = Buffer.from(event.memoHex, 'hex').toString('utf-8').trim();
@@ -84,35 +87,51 @@ async function defaultPersistEvent(event: StellarTransferEvent): Promise<void> {
       // originated from a chat message; non-UUID memos are ignored.
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(memo)) {
         const [existing] = await db
-          .select({ id: messages.id })
+          .select({
+            id: messages.id,
+            conversationId: messages.conversationId,
+            senderId: messages.senderId,
+          })
           .from(messages)
           .where(eq(messages.id, memo))
           .limit(1);
-        if (existing) messageId = existing.id;
+        if (existing) {
+          messageId = existing.id;
+          conversationId = existing.conversationId;
+          senderId = existing.senderId;
+        }
       }
     } catch {
       // Non-fatal — memo just stays raw, no association.
     }
   }
 
+  // Fallbacks if not found (required columns in tokenTransfers)
+  if (!conversationId || !senderId) {
+    const [fallbackConv] = await db.select({ id: conversations.id }).from(conversations).limit(1);
+    const [fallbackUser] = await db.select({ id: users.id }).from(users).limit(1);
+    if (!fallbackConv || !fallbackUser) {
+      return;
+    }
+    conversationId = fallbackConv.id;
+    senderId = fallbackUser.id;
+  }
+
   await db
     .insert(tokenTransfers)
     .values({
       txHash: event.txHash,
-      ledger: event.ledger,
-      fromAddress: event.from,
-      toAddress: event.to,
+      conversationId,
+      senderId,
+      recipientAddress: event.to,
       amount: event.amount,
-      memoHex: event.memoHex ?? null,
-      messageId,
+      tokenContractId: 'placeholder_token_contract_id',
+      memo: event.memoHex ?? null,
     })
     .onConflictDoUpdate({
       target: tokenTransfers.txHash,
       set: {
-        // Touch observedAt + ledger on duplicate so a re-emitted event
-        // updates the row instead of being silently dropped.
-        ledger: sql`EXCLUDED.ledger`,
-        observedAt: sql`now()`,
+        createdAt: sql`now()`,
       },
     });
 }
