@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -47,6 +48,20 @@ class IndexMessageRequest(BaseModel):
     conversationId: str
     senderId: str
     content: str
+
+
+RiskLevel = Literal["low", "medium", "high"]
+
+
+class ProposalSummariseRequest(BaseModel):
+    title: str
+    description: str
+    amount: float
+
+
+class ProposalSummariseResponse(BaseModel):
+    summary: str
+    risk: RiskLevel
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -112,6 +127,41 @@ def analyse_transfer(request: TransferAnalyseRequest):
         reason=result.get("reason"),
         confidence=float(result.get("confidence", 0.0)),
     )
+
+
+@app.post("/proposals/summarise", response_model=ProposalSummariseResponse)
+def summarise_proposal(request: ProposalSummariseRequest):
+    client = _openai_client()
+    prompt = (
+        "Summarise this Clicked governance proposal for a frontend reader and "
+        "rate its risk level.\n"
+        f"Title: {request.title}\n"
+        f"Description: {request.description}\n"
+        f"Amount: {request.amount} XLM\n\n"
+        "Reply with JSON only using keys: summary (a plain-English summary of "
+        "exactly 2 sentences), risk (one of \"low\", \"medium\", \"high\"). "
+        "Use \"high\" for large amounts, unclear intent, or obvious red flags; "
+        "\"low\" for small, well-scoped, low-impact proposals; otherwise \"medium\"."
+    )
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        timeout=10,
+    )
+    result = json.loads(response.choices[0].message.content)
+
+    summary = (result.get("summary") or "").strip()
+    if not summary:
+        raise HTTPException(status_code=502, detail="LLM did not return a summary")
+
+    risk = str(result.get("risk", "")).strip().lower()
+    if risk not in ("low", "medium", "high"):
+        # Defensive fallback: never return an invalid risk level to the caller.
+        risk = "medium"
+
+    # Pydantic re-validates via response_model before the response is sent.
+    return ProposalSummariseResponse(summary=summary, risk=risk)
 
 
 @app.post("/index/message")
