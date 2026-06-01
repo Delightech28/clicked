@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { IRouter } from 'express';
-import { and, asc, count, desc, eq, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, lt, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { conversationMembers, conversations, messages, tokenTransfers } from '../db/schema.js';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
@@ -13,12 +13,14 @@ conversationsRouter.use(requireAuth);
 const SEARCH_RESULT_LIMIT = 20;
 
 // List all conversations the authenticated user belongs to
+// Pass ?archived=true to include archived conversations
 conversationsRouter.get('/', async (req: AuthRequest, res) => {
   const userId = req.auth!.userId;
+  const showArchived = req.query['archived'] === 'true';
   const key = convCacheKey(userId);
 
-  // Cache read — skip on cache miss or Redis unavailable
-  if (redis) {
+  // Cache read — skip when requesting archived (different result set)
+  if (!showArchived && redis) {
     try {
       const cached = await redis.get(key);
       if (cached) {
@@ -31,7 +33,10 @@ conversationsRouter.get('/', async (req: AuthRequest, res) => {
   }
 
   const memberships = await db.query.conversationMembers.findMany({
-    where: eq(conversationMembers.userId, userId),
+    where: and(
+      eq(conversationMembers.userId, userId),
+      showArchived ? undefined : eq(conversationMembers.isArchived, false),
+    ),
     with: {
       conversation: {
         with: {
@@ -68,11 +73,13 @@ conversationsRouter.get('/', async (req: AuthRequest, res) => {
 
   const result = memberships.map((m) => ({
     ...m.conversation,
+    isMuted: m.isMuted,
+    isArchived: m.isArchived,
     messageCount: countMap.get(m.conversationId) ?? 0,
   }));
 
-  // Cache write with 30-second TTL
-  if (redis) {
+  // Cache write with 30-second TTL (only for default non-archived view)
+  if (!showArchived && redis) {
     try {
       await redis.setex(key, CONV_CACHE_TTL, JSON.stringify(result));
     } catch {
@@ -213,6 +220,62 @@ conversationsRouter.get('/:id/search', async (req: AuthRequest, res) => {
   `);
 
   res.json({ results });
+});
+
+// PATCH /conversations/:id/settings — update muted/archived state for the authenticated user
+conversationsRouter.patch('/:id/settings', async (req: AuthRequest, res) => {
+  const userId = req.auth!.userId;
+  const conversationId = req.params['id'] as string | undefined;
+
+  if (!conversationId) {
+    res.status(400).json({ error: 'Conversation id is required' });
+    return;
+  }
+
+  const { muted, archived } = req.body as { muted?: boolean; archived?: boolean };
+
+  if (muted === undefined && archived === undefined) {
+    res.status(400).json({ error: 'At least one of muted or archived is required' });
+    return;
+  }
+
+  const membership = await db.query.conversationMembers.findFirst({
+    where: and(
+      eq(conversationMembers.conversationId, conversationId),
+      eq(conversationMembers.userId, userId),
+    ),
+  });
+
+  if (!membership) {
+    res.status(403).json({ error: 'Not a member of this conversation' });
+    return;
+  }
+
+  const updates: Partial<{ isMuted: boolean; isArchived: boolean }> = {};
+  if (muted !== undefined) updates.isMuted = muted;
+  if (archived !== undefined) updates.isArchived = archived;
+
+  const [updated] = await db
+    .update(conversationMembers)
+    .set(updates)
+    .where(
+      and(
+        eq(conversationMembers.conversationId, conversationId),
+        eq(conversationMembers.userId, userId),
+      ),
+    )
+    .returning();
+
+  // Invalidate conversation list cache for this user
+  if (redis) {
+    try {
+      await redis.del(convCacheKey(userId));
+    } catch {
+      // Ignore
+    }
+  }
+
+  res.json({ isMuted: updated!.isMuted, isArchived: updated!.isArchived });
 });
 
 // Save a token transfer for a conversation

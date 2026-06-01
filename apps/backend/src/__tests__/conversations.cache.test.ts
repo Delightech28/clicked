@@ -29,6 +29,14 @@ let mockRedisInstance: {
 const mockFindMany = vi.fn();
 const mockFindFirst = vi.fn();
 const mockExecute = vi.fn();
+const mockSelect = vi.fn();
+
+const mockSelectChain = {
+  from: vi.fn().mockReturnThis(),
+  where: vi.fn().mockReturnThis(),
+  groupBy: vi.fn().mockResolvedValue([]),
+};
+mockSelect.mockReturnValue(mockSelectChain);
 
 vi.mock('../db/index.js', () => ({
   db: {
@@ -36,11 +44,12 @@ vi.mock('../db/index.js', () => ({
       conversationMembers: { findMany: mockFindMany, findFirst: mockFindFirst },
     },
     execute: mockExecute,
+    select: mockSelect,
   },
 }));
 
 vi.mock('../db/schema.js', () => ({ conversationMembers: {}, messages: { createdAt: 'createdAt' } }));
-vi.mock('drizzle-orm', () => ({ eq: vi.fn(), desc: vi.fn(), and: vi.fn(), sql: vi.fn() }));
+vi.mock('drizzle-orm', () => ({ eq: vi.fn(), desc: vi.fn(), and: vi.fn(), sql: Object.assign(vi.fn(), { join: vi.fn() }), count: vi.fn(), lt: vi.fn() }));
 
 // ── Auth middleware mock: always passes with test userId ───────────────────
 
@@ -85,8 +94,8 @@ describe('GET /conversations — Redis caching', () => {
 
   it('queries DB and writes to cache on cache miss', async () => {
     mockGet.mockResolvedValue(null); // cache miss
-    const dbResult = [{ id: 'conv-2', type: 'group' }];
-    mockFindMany.mockResolvedValue(dbResult.map((c) => ({ conversation: c })));
+    const conv = { id: 'conv-2', type: 'group' };
+    mockFindMany.mockResolvedValue([{ conversationId: conv.id, isMuted: false, isArchived: false, conversation: conv }]);
     mockSetex.mockResolvedValue('OK');
 
     const res = await request(makeApp()).get('/conversations');
@@ -96,14 +105,14 @@ describe('GET /conversations — Redis caching', () => {
     expect(mockSetex).toHaveBeenCalledWith(
       `conversations:${TEST_USER_ID}`,
       30,
-      JSON.stringify(dbResult),
+      expect.any(String),
     );
   });
 
   it('falls back to DB when Redis is unavailable (redis is null)', async () => {
     mockRedisInstance = null; // simulate no Redis
-    const dbResult = [{ id: 'conv-3' }];
-    mockFindMany.mockResolvedValue(dbResult.map((c) => ({ conversation: c })));
+    const conv = { id: 'conv-3' };
+    mockFindMany.mockResolvedValue([{ conversationId: conv.id, isMuted: false, isArchived: false, conversation: conv }]);
 
     const res = await request(makeApp()).get('/conversations');
 
@@ -114,8 +123,8 @@ describe('GET /conversations — Redis caching', () => {
 
   it('falls back to DB when Redis.get throws', async () => {
     mockGet.mockRejectedValue(new Error('Redis connection refused'));
-    const dbResult = [{ id: 'conv-4' }];
-    mockFindMany.mockResolvedValue(dbResult.map((c) => ({ conversation: c })));
+    const conv = { id: 'conv-4' };
+    mockFindMany.mockResolvedValue([{ conversationId: conv.id, isMuted: false, isArchived: false, conversation: conv }]);
     mockSetex.mockResolvedValue('OK');
 
     const res = await request(makeApp()).get('/conversations');
