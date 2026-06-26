@@ -11,6 +11,9 @@ const JWT_SECRET: string = SECRET;
 export interface JwtPayload {
   userId: string;
   walletAddress: string;
+  // Present once the session is bound to a registered device (see user_devices).
+  // Used to flag the requesting device as `current` in device listings.
+  deviceId?: string;
 }
 
 export function signToken(payload: JwtPayload): string {
