@@ -57,6 +57,36 @@ export const conversationMembers = pgTable('conversation_members', {
   joinedAt: timestamp('joined_at').notNull().defaultNow(),
 });
 
+// ─── Uploaded files (#228) ───────────────────────────────────────────────────
+//
+// Tracks files that clients have uploaded to object storage. A file moves
+// through: pending → ready (server-confirmed the bytes arrived) → deleted.
+// Only `ready` files may be referenced in file messages. The `fileKey`
+// (symmetric encryption key) lives exclusively inside the E2EE envelope
+// ciphertext — it is NEVER stored here.
+
+export const fileStatusEnum = pgEnum('file_status', ['pending', 'ready', 'deleted']);
+
+export const files = pgTable('files', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  uploaderId: uuid('uploader_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  conversationId: uuid('conversation_id')
+    .notNull()
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  status: fileStatusEnum('status').notNull().default('pending'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export const messageContentTypeEnum = pgEnum('message_content_type', [
+  'text',
+  'file',
+  'image',
+  'video',
+  'audio',
+]);
+
 export const messages = pgTable(
   'messages',
   {
@@ -67,7 +97,14 @@ export const messages = pgTable(
     senderId: uuid('sender_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // For text messages this holds the plaintext (or ciphertext envelope).
+    // For file messages this holds the E2EE envelope JSON which includes
+    // fileId, fileName, mimeType, size, fileKey, and optional thumbnail.
+    // fileKey is ONLY ever inside this encrypted envelope — never in plaintext.
     content: text('content').notNull(),
+    contentType: messageContentTypeEnum('content_type').notNull().default('text'),
+    // Foreign key to the files table — only set for file/image/video/audio messages.
+    fileId: uuid('file_id').references(() => files.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     deletedAt: timestamp('deleted_at'),
   },
@@ -249,6 +286,15 @@ export const conversationsRelations = relations(conversations, ({ many }) => ({
   messages: many(messages),
   transfers: many(tokenTransfers),
   treasuryProposals: many(treasuryProposals),
+  files: many(files),
+}));
+
+export const filesRelations = relations(files, ({ one }) => ({
+  uploader: one(users, { fields: [files.uploaderId], references: [users.id] }),
+  conversation: one(conversations, {
+    fields: [files.conversationId],
+    references: [conversations.id],
+  }),
 }));
 
 export const conversationMembersRelations = relations(conversationMembers, ({ one }) => ({
@@ -265,6 +311,7 @@ export const messagesRelations = relations(messages, ({ one }) => ({
     references: [conversations.id],
   }),
   sender: one(users, { fields: [messages.senderId], references: [users.id] }),
+  file: one(files, { fields: [messages.fileId], references: [files.id] }),
 }));
 
 export const tokenTransfersRelations = relations(tokenTransfers, ({ one }) => ({
@@ -303,6 +350,8 @@ export type NewConversation = typeof conversations.$inferInsert;
 export type ConversationMember = typeof conversationMembers.$inferSelect;
 export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
+export type File = typeof files.$inferSelect;
+export type NewFile = typeof files.$inferInsert;
 export type TokenTransfer = typeof tokenTransfers.$inferSelect;
 export type NewTokenTransfer = typeof tokenTransfers.$inferInsert;
 export type Device = typeof devices.$inferSelect;
