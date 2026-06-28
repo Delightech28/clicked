@@ -3,9 +3,10 @@ import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { createClient } from 'redis';
 import dotenv from 'dotenv';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { conversationMembers, users } from './db/schema.js';
+import { publishEphemeral } from './services/resumeStream.js';
 import { socketAuthMiddleware, type AuthSocket } from './middleware/socketAuth.js';
 import { registerMessagingHandlers } from './socket/messaging.js';
 import { app } from './app.js';
@@ -45,6 +46,28 @@ const io = new Server(httpServer, {
 });
 
 setSocketServer(io);
+
+// Record a presence change on the resume streams of everyone who shares a
+// conversation with this user (#200), so members who are offline at the moment
+// of the change can replay it when they reconnect. Best-effort and Redis-only.
+async function recordPresenceForCoMembers(
+  userId: string,
+  online: boolean,
+  conversationIds: string[],
+): Promise<void> {
+  if (!appRedis || conversationIds.length === 0) {
+    return;
+  }
+  const coMembers = await db.query.conversationMembers.findMany({
+    where: inArray(conversationMembers.conversationId, conversationIds),
+    columns: { userId: true },
+  });
+  await publishEphemeral(
+    appRedis,
+    coMembers.map((m) => m.userId).filter((id) => id !== userId),
+    { type: 'presence_update', data: { userId, online } },
+  );
+}
 
 io.use(socketAuthMiddleware);
 
@@ -124,6 +147,11 @@ io.on('connection', async (socket: AuthSocket) => {
         io.to(m.conversationId).emit('user_online', { userId });
         io.to(m.conversationId).emit('presence_update', { userId, online: true });
       }
+      await recordPresenceForCoMembers(
+        userId,
+        true,
+        memberships.map((m) => m.conversationId),
+      );
     }
   }
 
@@ -157,6 +185,11 @@ io.on('connection', async (socket: AuthSocket) => {
             io.to(m.conversationId).emit('user_offline', { userId });
             io.to(m.conversationId).emit('presence_update', { userId, online: false });
           }
+          await recordPresenceForCoMembers(
+            userId,
+            false,
+            memberships.map((m) => m.conversationId),
+          );
         }
       }
     }
