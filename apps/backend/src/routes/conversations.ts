@@ -95,7 +95,12 @@ conversationsRouter.get('/', async (req: AuthRequest, res) => {
     with: {
       conversation: conversationRelations as never,
     },
-  })) as unknown as Array<{ conversationId: string; conversation: ConversationPayload }>;
+  })) as unknown as Array<{
+    conversationId: string;
+    isMuted: boolean;
+    isArchived: boolean;
+    conversation: ConversationPayload;
+  }>;
 
   // Single subquery for message counts — no N+1
   const conversationIds = memberships.map((m) => m.conversationId);

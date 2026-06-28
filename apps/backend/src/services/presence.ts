@@ -10,7 +10,11 @@
  * - On disconnect: remove socketId from set, if set empty → user_offline
  * - GET /users/:id/presence → { online: boolean }
  */
+import type { Server } from 'socket.io';
 import type { Redis } from 'ioredis';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { conversationMembers } from '../db/schema.js';
 
 const PRESENCE_TTL = 60; // seconds
 
@@ -61,4 +65,79 @@ export async function isOnline(redis: Redis, userId: string): Promise<boolean> {
   const key = presenceKey(userId);
   const count = await redis.scard(key);
   return count > 0;
+}
+
+/**
+ * Remove any socket IDs in the user's presence set that are no longer
+ * connected anywhere in the Socket.IO cluster.
+ */
+export async function cleanupStaleSockets(
+  io: Server,
+  redis: Redis,
+  userId: string,
+  ignoredSocketId?: string,
+): Promise<void> {
+  const key = presenceKey(userId);
+  const socketIds = await redis.smembers(key);
+  if (socketIds.length === 0) return;
+
+  await Promise.all(
+    socketIds.map(async (sid) => {
+      if (ignoredSocketId && sid === ignoredSocketId) return;
+      try {
+        const sockets = await io.in(sid).fetchSockets();
+        if (sockets.length === 0) {
+          await redis.srem(key, sid);
+        }
+      } catch (err) {
+        console.warn(`[presence] Failed to check socket status for ${sid}:`, err);
+      }
+    }),
+  );
+
+  const remaining = await redis.scard(key);
+  if (remaining === 0) {
+    await redis.del(key);
+  }
+}
+
+/**
+ * Rebuild room subscriptions from active Redis socket mappings on gateway boot.
+ */
+export async function reconcileBoot(io: Server, redis: Redis): Promise<void> {
+  let presenceKeys: string[];
+  try {
+    let cursor = '0';
+    presenceKeys = [];
+    do {
+      const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'presence:*', 'COUNT', 100);
+      cursor = nextCursor;
+      presenceKeys.push(...keys);
+    } while (cursor !== '0');
+  } catch {
+    presenceKeys = await redis.keys('presence:*');
+  }
+
+  for (const key of presenceKeys) {
+    const userId = key.slice('presence:'.length);
+    if (!userId) continue;
+
+    const socketIds = await redis.smembers(key);
+    if (socketIds.length === 0) continue;
+
+    try {
+      const memberships = await db.query.conversationMembers.findMany({
+        where: eq(conversationMembers.userId, userId),
+        columns: { conversationId: true },
+      });
+
+      for (const socketId of socketIds) {
+        for (const m of memberships) {
+          io.in(socketId).socketsJoin(m.conversationId);
+        }
+      }
+    } catch (err) {
+      console.warn(`[presence] Failed to rebuild subscriptions for ${userId}:`, err);
+    }
+  }
 }

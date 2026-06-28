@@ -11,7 +11,13 @@ import { registerMessagingHandlers } from './socket/messaging.js';
 import { app } from './app.js';
 import { redis as appRedis } from './lib/redis.js';
 import { setSocketServer } from './lib/socket.js';
-import { setOnline, setOffline, refreshPresence } from './services/presence.js';
+import {
+  setOnline,
+  setOffline,
+  refreshPresence,
+  reconcileBoot,
+  cleanupStaleSockets,
+} from './services/presence.js';
 import {
   buildRpcFetcher,
   buildTreasuryRpcFetcher,
@@ -29,6 +35,27 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: '*' },
 });
+
+let isShuttingDown = false;
+
+const handleShutdown = () => {
+  isShuttingDown = true;
+};
+
+process.on('SIGTERM', handleShutdown);
+process.on('SIGINT', handleShutdown);
+
+const origIoClose = io.close.bind(io);
+io.close = ((fn?: () => void) => {
+  isShuttingDown = true;
+  return origIoClose(fn);
+}) as typeof io.close;
+
+const origHttpClose = httpServer.close.bind(httpServer);
+httpServer.close = ((fn?: (err?: Error) => void) => {
+  isShuttingDown = true;
+  return origHttpClose(fn);
+}) as typeof httpServer.close;
 
 setSocketServer(io);
 
@@ -49,6 +76,7 @@ io.on('connection', async (socket: AuthSocket) => {
   }
 
   if (appRedis) {
+    await cleanupStaleSockets(io, appRedis, userId, socket.id);
     await setOnline(appRedis, userId, socket.id);
     for (const m of memberships) {
       io.to(m.conversationId).emit('user_online', { userId });
@@ -58,15 +86,24 @@ io.on('connection', async (socket: AuthSocket) => {
 
   socket.on('heartbeat', async () => {
     if (appRedis) {
+      await cleanupStaleSockets(io, appRedis, userId, socket.id);
       await refreshPresence(appRedis, userId);
     }
   });
 
   registerMessagingHandlers(io, socket);
 
-  socket.on('disconnect', async () => {
-    console.log('User disconnected:', userId);
+  socket.on('disconnect', async (reason: string) => {
+    console.log('User disconnected:', userId, reason);
+    if (
+      isShuttingDown ||
+      reason === 'server shutting down' ||
+      reason === 'server namespace disconnect'
+    ) {
+      return;
+    }
     if (appRedis) {
+      await cleanupStaleSockets(io, appRedis, userId, socket.id);
       const fullyOffline = await setOffline(appRedis, userId, socket.id);
       if (fullyOffline) {
         const memberships = await db.query.conversationMembers.findMany({
@@ -111,6 +148,15 @@ async function attachRedisAdapter(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[socket.io] Redis unavailable (${message}) — running in single-instance mode`);
     await Promise.allSettled([pubClient.quit(), subClient.quit()]);
+  } finally {
+    if (appRedis) {
+      try {
+        await reconcileBoot(io, appRedis);
+        console.log('[presence] Boot reconciliation complete');
+      } catch (err) {
+        console.warn('[presence] Boot reconciliation failed:', err);
+      }
+    }
   }
 }
 
@@ -149,3 +195,5 @@ if (stellarRpcUrl && tokenTransferContractId) {
     '[stellar-listener] STELLAR_RPC_URL or TOKEN_TRANSFER_CONTRACT_ID unset; listener disabled.',
   );
 }
+
+export { httpServer, io };
