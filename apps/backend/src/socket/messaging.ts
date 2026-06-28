@@ -141,6 +141,127 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
     },
   );
 
+  // ── edit_message ─────────────────────────────────────────────────────────────
+  // Payload: { originalMessageId, messageId, contentType?, ciphertext?, envelopes? }
+  // An edit is never an in-place plaintext mutation (#190). It is a brand-new
+  // message carrying fresh ciphertext + envelopes, linked back to the original
+  // via `editsMessageId`. Only the original sender may edit. We broadcast both
+  // `new_message` (so devices receive the new ciphertext to decrypt) and
+  // `message_edited` (so clients render the newest version with an "edited"
+  // marker and supersede the original).
+  socket.on(
+    'edit_message',
+    async (payload: {
+      originalMessageId: string;
+      messageId: string;
+      contentType?: string;
+      ciphertext?: string;
+      envelopes?: Array<{ recipientDeviceId: string; ciphertext: string }>;
+    }) => {
+      const { originalMessageId, messageId, contentType, ciphertext, envelopes } = payload;
+      const deviceId = socket.auth!.deviceId;
+
+      if (!originalMessageId || !messageId) {
+        socket.emit('error', {
+          event: 'edit_message',
+          message: 'originalMessageId and messageId are required',
+        });
+        return;
+      }
+
+      if (!ciphertext?.trim() && (!envelopes || envelopes.length === 0)) {
+        socket.emit('error', { event: 'edit_message', message: 'Message content is empty' });
+        return;
+      }
+
+      const original = await db.query.messages.findFirst({
+        where: eq(messages.id, originalMessageId),
+      });
+
+      if (!original) {
+        socket.emit('error', { event: 'edit_message', message: 'Original message not found' });
+        return;
+      }
+
+      // Edit authorship is restricted to the original sender.
+      if (original.senderId !== userId) {
+        socket.emit('error', {
+          event: 'edit_message',
+          message: 'Only the original sender can edit this message',
+        });
+        return;
+      }
+
+      // Always link to the root original so a chain of edits collapses to one
+      // logical message: editing an edit still points back to the first version.
+      const rootMessageId = original.editsMessageId ?? original.id;
+      const conversationId = original.conversationId;
+
+      // Idempotency: a retried edit with the same new messageId is a no-op.
+      const existing = await db.query.messages.findFirst({
+        where: eq(messages.id, messageId),
+        columns: { sequenceNumber: true },
+      });
+
+      if (existing) {
+        socket.emit('message_ack', { messageId, sequenceNumber: existing.sequenceNumber });
+        return;
+      }
+
+      const [message] = await db
+        .insert(messages)
+        .values({
+          id: messageId,
+          conversationId,
+          senderId: userId,
+          senderDeviceId: deviceId,
+          contentType: contentType || original.contentType,
+          ciphertext: ciphertext || null,
+          editsMessageId: rootMessageId,
+        })
+        .returning();
+
+      if (envelopes && envelopes.length > 0) {
+        const deviceIds = envelopes.map((e) => e.recipientDeviceId);
+        const devicesList = await db.query.userDevices.findMany({
+          where: inArray(userDevices.id, deviceIds),
+          columns: { id: true, userId: true },
+        });
+        const deviceToUser = new Map(devicesList.map((d) => [d.id, d.userId]));
+
+        const validEnvelopes = envelopes
+          .filter((env) => deviceToUser.has(env.recipientDeviceId))
+          .map((env) => ({
+            messageId,
+            recipientDeviceId: env.recipientDeviceId,
+            recipientUserId: deviceToUser.get(env.recipientDeviceId)!,
+            ciphertext: env.ciphertext,
+          }));
+
+        if (validEnvelopes.length > 0) {
+          await db.insert(messageEnvelopes).values(validEnvelopes);
+        }
+      }
+
+      if (message) {
+        socket.emit('message_ack', { messageId, sequenceNumber: message.sequenceNumber });
+        io.to(conversationId).emit('new_message', message);
+      }
+
+      io.to(conversationId).emit('message_edited', {
+        originalMessageId: rootMessageId,
+        newMessageId: messageId,
+      });
+
+      const members = await db.query.conversationMembers.findMany({
+        where: eq(conversationMembers.conversationId, conversationId),
+        columns: { userId: true },
+      });
+
+      await invalidateConversationCaches(members.map((member) => member.userId));
+    },
+  );
+
   // ── message_history ────────────────────────────────────────────────────────
   // Payload: { conversationId: string; before?: string } (before = message id cursor)
   // Returns the last PAGE_SIZE messages, optionally before a cursor for pagination.
