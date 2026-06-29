@@ -58,6 +58,7 @@ vi.mock('../db/schema.js', () => ({
     createdAt: 'createdAt',
     deletedAt: 'deletedAt',
   },
+  messageEnvelopes: { recipientDeviceId: 'recipientDeviceId' },
   tokenTransfers: {},
 }));
 
@@ -73,7 +74,10 @@ vi.mock('drizzle-orm', () => ({
 
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    (req as express.Request & { auth: { userId: string } }).auth = { userId: 'user-1' };
+    (req as express.Request & { auth: { userId: string; deviceId: string } }).auth = {
+      userId: 'user-1',
+      deviceId: 'device-1',
+    };
     next();
   },
 }));

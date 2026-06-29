@@ -66,6 +66,7 @@ vi.mock('../db/schema.js', () => ({
     createdAt: 'createdAt',
     deletedAt: 'deletedAt',
   },
+  messageEnvelopes: { recipientDeviceId: 'recipientDeviceId' },
   tokenTransfers: {},
 }));
 vi.mock('drizzle-orm', () => {
@@ -94,7 +95,10 @@ const TEST_USER_ID = 'user-test-123';
 
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    (req as express.Request & { auth: { userId: string } }).auth = { userId: TEST_USER_ID };
+    (req as express.Request & { auth: { userId: string; deviceId: string } }).auth = {
+      userId: TEST_USER_ID,
+      deviceId: 'device-test-123',
+    };
     next();
   },
 }));

@@ -2,7 +2,13 @@ import { Router } from 'express';
 import type { IRouter } from 'express';
 import { asc, and, count, desc, eq, lt, sql, ne } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { conversationMembers, conversations, messages, tokenTransfers } from '../db/schema.js';
+import {
+  conversationMembers,
+  conversations,
+  messages,
+  tokenTransfers,
+  messageEnvelopes,
+} from '../db/schema.js';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { redis, CONV_CACHE_TTL, convCacheKey } from '../lib/redis.js';
 import { invalidateConversationCaches } from '../lib/conversationCache.js';
@@ -14,7 +20,7 @@ export const conversationsRouter: IRouter = Router();
 
 conversationsRouter.use(requireAuth);
 
-const conversationRelations = {
+const getConversationRelations = (deviceId: string) => ({
   members: {
     with: {
       user: {
@@ -26,9 +32,15 @@ const conversationRelations = {
   messages: {
     orderBy: desc(messages.createdAt),
     limit: 1,
-    with: { sender: { columns: { id: true, username: true, avatarUrl: true } } },
+    with: {
+      sender: { columns: { id: true, username: true, avatarUrl: true } },
+      envelopes: {
+        where: eq(messageEnvelopes.recipientDeviceId, deviceId),
+        limit: 1,
+      },
+    },
   },
-} as const;
+});
 
 type ConversationPayload = {
   messages?: Array<ReturnType<typeof serializeMessage>>;
@@ -38,7 +50,9 @@ type ConversationPayload = {
 function serializeConversation<T extends ConversationPayload>(conversation: T): T {
   return {
     ...conversation,
-    messages: (conversation.messages ?? []).map((message) => serializeMessage(message)),
+    messages: (conversation.messages ?? []).map((message) =>
+      serializeMessage(message as any),
+    ) as any,
   };
 }
 
@@ -91,9 +105,14 @@ conversationsRouter.get('/', async (req: AuthRequest, res) => {
       showArchived ? undefined : ne(conversationMembers.isArchived, true),
     ),
     with: {
-      conversation: conversationRelations as never,
+      conversation: getConversationRelations(req.auth!.deviceId) as never,
     },
-  })) as unknown as Array<{ conversationId: string; conversation: ConversationPayload }>;
+  })) as unknown as Array<{
+    conversationId: string;
+    isMuted: boolean;
+    isArchived: boolean;
+    conversation: ConversationPayload;
+  }>;
 
   // Single subquery for message counts — no N+1
   const conversationIds = memberships.map((m) => m.conversationId);
@@ -175,7 +194,7 @@ conversationsRouter.get('/:id', async (req: AuthRequest, res) => {
 
   const conversation = (await db.query.conversations.findFirst({
     where: eq(conversations.id, conversationId),
-    with: conversationRelations as never,
+    with: getConversationRelations(req.auth!.deviceId) as never,
   })) as ConversationPayload | undefined;
 
   if (!conversation) {
@@ -469,7 +488,13 @@ conversationsRouter.get('/:id/messages', async (req: AuthRequest, res) => {
       : eq(messages.conversationId, conversationId),
     orderBy: desc(messages.createdAt),
     limit: limit + 1,
-    with: { sender: { columns: { id: true, username: true, avatarUrl: true } } },
+    with: {
+      sender: { columns: { id: true, username: true, avatarUrl: true } },
+      envelopes: {
+        where: eq(messageEnvelopes.recipientDeviceId, req.auth!.deviceId),
+        limit: 1,
+      },
+    },
   });
 
   const hasMore = rows.length > limit;
@@ -483,9 +508,8 @@ conversationsRouter.get('/:id/messages', async (req: AuthRequest, res) => {
   res.json({ messages: page, nextCursor });
 });
 
-// GET /conversations/:id/search — disabled in E2EE environments (server cannot read ciphertext)
-conversationsRouter.get('/:id/search', (_req: AuthRequest, res) => {
-  res.status(501).json({ error: 'Full-text search is not available in E2EE environments' });
+conversationsRouter.get('/:id/search', async (req: AuthRequest, res) => {
+  res.status(501).json({ error: 'Search is not supported in E2EE conversations' });
 });
 
 // PATCH /conversations/:id/settings — update muted/archived state for the authenticated user
