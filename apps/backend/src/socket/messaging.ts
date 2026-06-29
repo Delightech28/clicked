@@ -12,6 +12,7 @@ import type { AuthSocket } from '../middleware/socketAuth.js';
 import { invalidateConversationCaches } from '../lib/conversationCache.js';
 import { serializeMessage } from '../lib/messages.js';
 import { redis } from '../lib/redis.js';
+import { publishEphemeral, readMissedEvents } from '../services/resumeStream.js';
 
 const PAGE_SIZE = 30;
 
@@ -257,8 +258,48 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
         );
 
       io.to(conversationId).volatile.emit('read_receipt', { userId, lastReadMessageId });
+
+      // Persist this receipt to each member's resume stream so a member who is
+      // offline right now can replay it on reconnect. The receipt is ephemeral
+      // (Redis only) — the underlying messages are recovered via envelope sync.
+      // Skip the member lookup entirely when there is no stream to write to.
+      if (redis) {
+        const members = await db.query.conversationMembers.findMany({
+          where: eq(conversationMembers.conversationId, conversationId),
+          columns: { userId: true },
+        });
+        await publishEphemeral(
+          redis,
+          members.map((member) => member.userId),
+          { type: 'read_receipt', data: { conversationId, userId, lastReadMessageId } },
+        );
+      }
     },
   );
+
+  // ── resume ───────────────────────────────────────────────────────────────────
+  // Payload: { lastEventId?: string }
+  // On reconnect, replay the lightweight ephemeral events this device missed
+  // (receipts, presence, system notices) from its short-lived Redis stream, then
+  // tell the client to run a full envelope sync for durable messages — which live
+  // in Postgres and are intentionally never placed on the resume stream.
+  socket.on('resume', async (payload: { lastEventId?: string }) => {
+    if (!redis) {
+      // No replay backend available; the client must fall back to a full sync.
+      socket.emit('resume_complete', { lastEventId: null, syncRequired: true });
+      return;
+    }
+
+    const lastEventId = typeof payload?.lastEventId === 'string' ? payload.lastEventId : '';
+
+    const missed = await readMissedEvents(redis, userId, lastEventId);
+    for (const event of missed) {
+      socket.emit('ephemeral_replay', { id: event.id, type: event.type, data: event.data });
+    }
+
+    const newCursor = missed.length > 0 ? missed[missed.length - 1]!.id : lastEventId || null;
+    socket.emit('resume_complete', { lastEventId: newCursor, syncRequired: true });
+  });
 
   // ── create_conversation ────────────────────────────────────────────────────
   // Payload: { type: 'dm'|'group'; name?: string; memberIds: string[] }
