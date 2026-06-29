@@ -760,6 +760,7 @@ mod multisig_flow {
         // then assert get_pending_proposals() returns exactly the Active ones and
         // excludes terminal-state proposals.
     }
+}
 // ── propose_withdraw Tests (#122) ─────────────────────────────────────────────
 
 #[test]
