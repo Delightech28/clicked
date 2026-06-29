@@ -3,10 +3,7 @@ import type { IRouter } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { conversationMembers, messages, messageEnvelopes, userDevices } from '../db/schema.js';
-<<<<<<< HEAD
 import { softDeleteFile } from '../services/fileCleanup.js';
-=======
->>>>>>> e7b25b359e78829a44d02d24946ee0d04af1ee32
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { invalidateConversationCaches } from '../lib/conversationCache.js';
