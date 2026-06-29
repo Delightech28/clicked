@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { useWallet } from '@/contexts/WalletContext';
+import React, { useEffect, useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { useWallet } from "@/contexts/WalletContext";
+import { PushPermissionPrompt } from "@/components/PushPermissionPrompt";
 
 // Custom premium SVG Icons to avoid dependency weight
 const LogoIcon = () => (
@@ -151,8 +152,28 @@ const NavItem: React.FC<NavItemProps> = ({ href, label, icon, active }) => {
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { publicKey, connect, disconnect } = useWallet();
   const [isConnecting, setIsConnecting] = useState(false);
+
+  // Listen for sw:sync messages from the service worker (notification click).
+  // Navigate to the conversation so the page re-fetches fresh data.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+
+    function onSwMessage(event: MessageEvent<{ type: string; conversationId?: string | null }>) {
+      if (event.data?.type !== "sw:sync") return;
+      const { conversationId } = event.data;
+      if (conversationId) {
+        router.push(`/app/conversations/${conversationId}`);
+      } else {
+        router.push("/app/messages");
+      }
+    }
+
+    navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
+  }, [router]);
 
   const handleWalletAction = async () => {
     if (publicKey) {
@@ -248,6 +269,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <div className="flex-1 pl-16 md:pl-[240px] transition-all duration-300 min-h-screen flex flex-col">
         <main className="flex-1 p-4 md:p-8 max-w-7xl mx-auto w-full">{children}</main>
       </div>
+
+      {/* Contextual push permission prompt — shown 5 s after the user enters
+          the app, suppressed on denial or dismissal. */}
+      <PushPermissionPrompt />
     </div>
   );
 }
