@@ -83,7 +83,11 @@ export async function setOffline(redis: Redis, userId: string, deviceId: string)
  * Forcefully mark a device offline and remove it from the per-user hash.
  * Used when a heartbeat timeout or device revocation occurs.
  */
-export async function markDeviceOffline(redis: Redis, userId: string, deviceId: string): Promise<boolean> {
+export async function markDeviceOffline(
+  redis: Redis,
+  userId: string,
+  deviceId: string,
+): Promise<boolean> {
   const hashKey = presenceHashKey(userId);
   const deviceKey = presenceDeviceKey(userId, deviceId);
 

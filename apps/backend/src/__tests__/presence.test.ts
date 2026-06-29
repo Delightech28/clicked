@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { setOnline, refreshPresence, setOffline, markDeviceOffline, isOnline } from '../services/presence.js';
+import {
+  setOnline,
+  refreshPresence,
+  setOffline,
+  markDeviceOffline,
+  isOnline,
+} from '../services/presence.js';
 
 class FakeRedis {
   public hashes = new Map<string, Record<string, string>>();
