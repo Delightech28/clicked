@@ -40,7 +40,12 @@ export type PushSubscriptionState = {
 
 export function usePushSubscription(token: string | null): PushSubscriptionState {
   const [registration, setRegistration] = useState<ServiceWorkerRegistration | null>(null);
-  const [permission, setPermission] = useState<NotificationPermission>("default");
+  const [permission, setPermission] = useState<NotificationPermission>(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      return Notification.permission;
+    }
+    return "default";
+  });
   const [subscribed, setSubscribed] = useState(false);
 
   // Register the service worker once on mount.
@@ -62,13 +67,6 @@ export function usePushSubscription(token: string | null): PushSubscriptionState
       active = false;
     };
   }, []);
-
-  // Sync permission state on mount and when registration changes.
-  useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      setPermission(Notification.permission);
-    }
-  }, [registration]);
 
   // Re-use an existing subscription if one already exists.
   useEffect(() => {
