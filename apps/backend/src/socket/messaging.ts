@@ -25,6 +25,23 @@ const PAGE_SIZE = 30;
 export function registerMessagingHandlers(io: Server, socket: AuthSocket): void {
   const userId = socket.auth!.userId;
   const dispatcher = new EventDispatcher(io, socket, redis);
+  const typingTimers = new Map<string, NodeJS.Timeout>();
+
+  socket.on('disconnect', () => {
+    for (const [timerKey, timer] of typingTimers.entries()) {
+      clearTimeout(timer);
+      const idx = timerKey.indexOf(':');
+      const cid = idx === -1 ? timerKey : timerKey.slice(0, idx);
+      const did = idx === -1 ? undefined : timerKey.slice(idx + 1);
+      const rp: { conversationId: string; userId: string; deviceId?: string } = {
+        conversationId: cid,
+        userId,
+      };
+      if (did) rp.deviceId = did;
+      socket.to(cid).emit('typing_stop', rp);
+    }
+    typingTimers.clear();
+  });
 
   // ── join_room ──────────────────────────────────────────────────────────────
   dispatcher.register('join_room', async (payload) => {
@@ -57,6 +74,22 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
       envelopes?: Array<{ recipientDeviceId: string; ciphertext: string }>;
     };
     const deviceId = socket.auth!.deviceId;
+
+    // Clear active typing state as soon as the member attempts to send.
+    for (const [timerKey, timer] of typingTimers.entries()) {
+      if (timerKey === conversationId || timerKey.startsWith(`${conversationId}:`)) {
+        clearTimeout(timer);
+        typingTimers.delete(timerKey);
+        const idx = timerKey.indexOf(':');
+        const did = idx === -1 ? undefined : timerKey.slice(idx + 1);
+        const rp: { conversationId: string; userId: string; deviceId?: string } = {
+          conversationId,
+          userId,
+        };
+        if (did) rp.deviceId = did;
+        socket.to(conversationId).emit('typing_stop', rp);
+      }
+    }
 
     if (!messageId) {
       socket.emit('error', { event: 'send_message', message: 'messageId is required' });
@@ -507,6 +540,19 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
       relayPayload.deviceId = payloadDeviceId.trim();
     }
 
+    const timerKey = relayPayload.deviceId
+      ? `${conversationId}:${relayPayload.deviceId}`
+      : conversationId;
+
+    const existing = typingTimers.get(timerKey);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      typingTimers.delete(timerKey);
+      socket.to(conversationId).emit('typing_stop', relayPayload);
+    }, 5000);
+
+    typingTimers.set(timerKey, timer);
     socket.to(conversationId).emit('typing_start', relayPayload);
   });
 
@@ -546,6 +592,16 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
 
     if (payloadDeviceId?.trim()) {
       relayPayload.deviceId = payloadDeviceId.trim();
+    }
+
+    const timerKey = relayPayload.deviceId
+      ? `${conversationId}:${relayPayload.deviceId}`
+      : conversationId;
+
+    const existing = typingTimers.get(timerKey);
+    if (existing) {
+      clearTimeout(existing);
+      typingTimers.delete(timerKey);
     }
 
     socket.to(conversationId).emit('typing_stop', relayPayload);
