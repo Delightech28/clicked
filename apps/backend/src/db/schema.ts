@@ -57,21 +57,18 @@ export const conversationMembers = pgTable('conversation_members', {
   joinedAt: timestamp('joined_at').notNull().defaultNow(),
 });
 
-export const messages = pgTable(
-  'messages',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    conversationId: uuid('conversation_id')
-      .notNull()
-      .references(() => conversations.id, { onDelete: 'cascade' }),
-    senderId: uuid('sender_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    ciphertext: text('ciphertext'),
-    createdAt: timestamp('created_at').notNull().defaultNow(),
-    deletedAt: timestamp('deleted_at'),
-  },
-);
+export const messages = pgTable('messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id')
+    .notNull()
+    .references(() => conversations.id, { onDelete: 'cascade' }),
+  senderId: uuid('sender_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  ciphertext: text('ciphertext'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  deletedAt: timestamp('deleted_at'),
+});
 
 // ─── Devices & prekeys (issues #158, #159, #162) ─────────────────────────────
 //
