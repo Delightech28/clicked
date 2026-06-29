@@ -31,6 +31,7 @@ import {
   buildTreasuryRpcFetcher,
   runForever as runStellarListener,
 } from './services/stellarListener.js';
+import { startFileCleanupJob } from './services/fileCleanup.js';
 import { loadEnv } from './config.js';
 
 dotenv.config();
@@ -203,6 +204,9 @@ httpServer.listen(PORT, () => {
 // Attach the Redis adapter after listen() so the API is reachable even if
 // Redis is unreachable; on failure we fall back to the in-process adapter.
 void attachRedisAdapter();
+
+// #231 – start background file cleanup + push backoff re-enable job
+startFileCleanupJob();
 
 // Subscribe to device_revoked:* channels so any gateway instance can
 // disconnect a revoked device's sockets within seconds, even when the

@@ -59,6 +59,10 @@ vi.mock('drizzle-orm', () => ({
   sql: vi.fn(),
 }));
 
+vi.mock('../services/fileCleanup.js', () => ({
+  softDeleteFile: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     (req as express.Request & { auth: { userId: string } }).auth = { userId: 'user-1' };

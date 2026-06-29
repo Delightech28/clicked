@@ -52,6 +52,22 @@ export const contentTypeEnum = pgEnum('content_type', [
   'system',
 ]);
 
+// ─── Files (#231) ─────────────────────────────────────────────────────────────
+//
+// Tracks S3 storage objects for file-type messages. Soft-deleted when all
+// referencing messages are retracted; hard-deleted by the background cleanup job.
+
+export const files = pgTable('files', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  storageKey: text('storage_key').notNull().unique(),
+  deletedAt: timestamp('deleted_at'),
+  hardDeletedAt: timestamp('hard_deleted_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export type File = typeof files.$inferSelect;
+export type NewFile = typeof files.$inferInsert;
+
 export const conversationMembers = pgTable('conversation_members', {
   id: uuid('id').primaryKey().defaultRandom(),
   conversationId: uuid('conversation_id')
@@ -82,6 +98,7 @@ export const messages = pgTable('messages', {
   contentType: text('content_type').notNull().default('text/plain'),
   sequenceNumber: serial('sequence_number'),
   ciphertext: text('ciphertext'),
+  fileId: uuid('file_id').references(() => files.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   deletedAt: timestamp('deleted_at'),
 });
@@ -270,6 +287,8 @@ export const pushSubscriptions = pgTable('push_subscriptions', {
   endpoint: text('endpoint').notNull().unique(),
   p256dh: text('p256dh').notNull(),
   auth: text('auth').notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  disabledAt: timestamp('disabled_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 
@@ -315,7 +334,12 @@ export const messagesRelations = relations(messages, ({ one, many }) => ({
     fields: [messages.senderDeviceId],
     references: [userDevices.id],
   }),
+  file: one(files, { fields: [messages.fileId], references: [files.id] }),
   envelopes: many(messageEnvelopes),
+}));
+
+export const filesRelations = relations(files, ({ many }) => ({
+  messages: many(messages),
 }));
 
 export const messageEnvelopesRelations = relations(messageEnvelopes, ({ one }) => ({

@@ -7,11 +7,13 @@ import {
   messages,
   messageEnvelopes,
   userDevices,
+  files,
 } from '../db/schema.js';
 import type { AuthSocket } from '../middleware/socketAuth.js';
 import { invalidateConversationCaches } from '../lib/conversationCache.js';
 import { serializeMessage } from '../lib/messages.js';
 import { redis } from '../lib/redis.js';
+import { dispatchOfflinePush, FILE_CONTENT_TYPES } from '../services/pushNotification.js';
 
 const PAGE_SIZE = 30;
 
@@ -91,6 +93,18 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
         return;
       }
 
+      // #231 – create file tracking record for file-type messages
+      let fileId: string | undefined;
+      const resolvedContentType = contentType || 'text/plain';
+      if (FILE_CONTENT_TYPES.has(resolvedContentType)) {
+        const [fileRow] = await db
+          .insert(files)
+          .values({ storageKey: messageId })
+          .onConflictDoUpdate({ target: files.storageKey, set: { storageKey: messageId } })
+          .returning({ id: files.id });
+        fileId = fileRow?.id;
+      }
+
       const [message] = await db
         .insert(messages)
         .values({
@@ -98,10 +112,13 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
           conversationId,
           senderId: userId,
           senderDeviceId: deviceId,
-          contentType: contentType || 'text/plain',
+          contentType: resolvedContentType,
           ciphertext: ciphertext || null,
+          fileId: fileId ?? null,
         })
         .returning();
+
+      let recipientDeviceIds: string[] = [];
 
       if (envelopes && envelopes.length > 0) {
         const deviceIds = envelopes.map((e) => e.recipientDeviceId);
@@ -123,6 +140,8 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
         if (validEnvelopes.length > 0) {
           await db.insert(messageEnvelopes).values(validEnvelopes);
         }
+
+        recipientDeviceIds = validEnvelopes.map((e) => e.recipientDeviceId);
       }
 
       // Emit acknowledgment to sender
@@ -138,6 +157,9 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
       });
 
       await invalidateConversationCaches(members.map((member) => member.userId));
+
+      // #236 – push to offline recipient devices (fire-and-forget)
+      void dispatchOfflinePush(conversationId, messageId, recipientDeviceIds);
     },
   );
 
@@ -206,6 +228,12 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
       .set({ deletedAt: new Date(), ciphertext: null })
       .where(eq(messages.id, messageId));
     await db.delete(messageEnvelopes).where(eq(messageEnvelopes.messageId, messageId));
+
+    // #231 – soft-delete file record when message had a file attachment
+    if (message.fileId) {
+      const { softDeleteFile } = await import('../services/fileCleanup.js');
+      await softDeleteFile(message.fileId);
+    }
 
     io.to(message.conversationId).emit('message_deleted', { messageId });
   });

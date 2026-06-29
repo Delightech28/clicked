@@ -35,6 +35,11 @@ export function isDeviceRevoked(deviceId: string): boolean {
   return revokedMidSession.has(deviceId);
 }
 
+export function isDeviceConnected(deviceId: string): boolean {
+  const sockets = deviceSockets.get(deviceId);
+  return sockets !== undefined && sockets.size > 0;
+}
+
 export function markDeviceRevoked(deviceId: string): void {
   revokedMidSession.add(deviceId);
 }
