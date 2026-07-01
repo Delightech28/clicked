@@ -142,7 +142,7 @@ export const messageEnvelopes = pgTable(
   ],
 );
 
-// ─── Devices & prekeys (issues #158, #159, #162, #305, #302) ─────────────────
+// ─── Devices & prekeys (issues #158, #159, #162) ─────────────────────────────
 //
 // Each user may register multiple devices. Each device has an Ed25519 identity
 // key pair; the public key is stored here for fingerprint derivation and prekey

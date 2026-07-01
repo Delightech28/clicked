@@ -488,7 +488,11 @@ export function registerMessagingHandlers(io: Server, socket: AuthSocket): void 
         : eq(messages.conversationId, conversationId),
       orderBy: desc(messages.createdAt),
       limit: PAGE_SIZE,
-      with: { sender: { columns: { id: true, username: true, avatarUrl: true } } },
+      with: {
+        envelopes: true,
+        senderDevice: true,
+        sender: { columns: { id: true, username: true, avatarUrl: true } },
+      },
     });
 
     socket.emit('message_history', {
