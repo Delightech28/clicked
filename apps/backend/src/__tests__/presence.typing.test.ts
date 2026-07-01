@@ -74,10 +74,12 @@ type FakeTtlData = Map<string, number>;
 function makeFakeRedis() {
   const store: FakeRedisData = new Map();
   const ttls: FakeTtlData = new Map();
+  const hashes: Map<string, Record<string, string>> = new Map();
 
   return {
     store,
     ttls,
+    hashes,
     async sadd(key: string, member: string) {
       if (!store.has(key)) store.set(key, new Set());
       store.get(key)!.add(member);
@@ -96,16 +98,34 @@ function makeFakeRedis() {
     async del(key: string) {
       store.delete(key);
       ttls.delete(key);
+      hashes.delete(key);
       return 1;
     },
     async expire(key: string, seconds: number) {
       ttls.set(key, seconds);
       return 1;
     },
+    async hset(key: string, fields: Record<string, string>) {
+      if (!hashes.has(key)) hashes.set(key, {});
+      Object.assign(hashes.get(key)!, fields);
+      return 1;
+    },
+    async hdel(key: string, field: string) {
+      const hash = hashes.get(key);
+      if (hash) {
+        delete hash[field];
+      }
+      return 1;
+    },
+    async hlen(key: string) {
+      const hash = hashes.get(key);
+      return hash ? Object.keys(hash).length : 0;
+    },
     // Simulates TTL expiry: removes key as if Redis evicted it.
     simulateExpiry(key: string) {
       store.delete(key);
       ttls.delete(key);
+      hashes.delete(key);
     },
   };
 }
@@ -171,7 +191,7 @@ describe('presence: multi-device aggregation', () => {
     await setOnline(redis as never, 'user-1', 'socket-b');
 
     expect(await isOnline(redis as never, 'user-1')).toBe(true);
-    expect(redis.store.get('presence:user-1')?.size).toBe(2);
+    expect(Object.keys(redis.hashes.get('presence:user:user-1') ?? {}).length).toBe(2);
   });
 
   it('stays online when one of two devices disconnects', async () => {
@@ -202,7 +222,7 @@ describe('presence: multi-device aggregation', () => {
     await setOnline(redis as never, 'user-1', 'socket-a');
     await setOffline(redis as never, 'user-1', 'socket-a');
 
-    expect(redis.store.has('presence:user-1')).toBe(false);
+    expect(redis.hashes.has('presence:user:user-1')).toBe(false);
   });
 });
 
@@ -213,25 +233,27 @@ describe('presence: heartbeat timeout → offline', () => {
     const redis = makeFakeRedis();
     await setOnline(redis as never, 'user-1', 'socket-a');
 
-    await refreshPresence(redis as never, 'user-1');
+    await refreshPresence(redis as never, 'user-1', 'socket-a');
 
-    expect(redis.ttls.get('presence:user-1')).toBe(60);
+    expect(redis.ttls.get('presence:user:user-1:device:socket-a')).toBe(90);
   });
 
   it('refreshPresence is a no-op when the key does not exist (user already offline)', async () => {
     const redis = makeFakeRedis();
 
-    await refreshPresence(redis as never, 'user-1');
+    await refreshPresence(redis as never, 'user-1', 'socket-a');
 
-    expect(redis.ttls.has('presence:user-1')).toBe(false);
+    expect(redis.ttls.has('presence:user:user-1:device:socket-a')).toBe(false);
   });
 
   it('user appears offline after TTL expiry (simulated)', async () => {
     const redis = makeFakeRedis();
     await setOnline(redis as never, 'user-1', 'socket-a');
 
-    // Simulate Redis evicting the key due to TTL expiry
-    redis.simulateExpiry('presence:user-1');
+    // Simulate Redis evicting the device key due to TTL expiry
+    redis.simulateExpiry('presence:user:user-1:device:socket-a');
+    // Then explicitly remove device from hash (as would happen on next heartbeat check)
+    await redis.hdel('presence:user:user-1', 'socket-a');
 
     expect(await isOnline(redis as never, 'user-1')).toBe(false);
   });
@@ -241,17 +263,17 @@ describe('presence: heartbeat timeout → offline', () => {
     await setOnline(redis as never, 'user-1', 'socket-a');
 
     // Refresh before expiry — key should still be there
-    await refreshPresence(redis as never, 'user-1');
+    await refreshPresence(redis as never, 'user-1', 'socket-a');
 
     expect(await isOnline(redis as never, 'user-1')).toBe(true);
-    expect(redis.ttls.get('presence:user-1')).toBe(60);
+    expect(redis.ttls.get('presence:user:user-1:device:socket-a')).toBe(90);
   });
 
   it('setOnline sets the 60-second TTL', async () => {
     const redis = makeFakeRedis();
     await setOnline(redis as never, 'user-1', 'socket-a');
 
-    expect(redis.ttls.get('presence:user-1')).toBe(60);
+    expect(redis.ttls.get('presence:user:user-1:device:socket-a')).toBe(90);
   });
 });
 
@@ -439,7 +461,7 @@ describe('presence: debounced connect/disconnect transitions', () => {
     await setOnline(redis as never, 'user-1', 'socket-b');
     await setOnline(redis as never, 'user-1', 'socket-c');
 
-    expect(redis.store.get('presence:user-1')?.size).toBe(3);
+    expect(Object.keys(redis.hashes.get('presence:user:user-1') ?? {}).length).toBe(3);
     expect(await isOnline(redis as never, 'user-1')).toBe(true);
   });
 

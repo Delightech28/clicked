@@ -35,8 +35,9 @@ vi.mock('../db/index.js', () => ({
 }));
 
 vi.mock('../db/schema.js', () => ({
-  files: {},
+  files: { id: 'id' },
   conversationMembers: {},
+  fileStatusEnum: vi.fn(),
 }));
 
 vi.mock('drizzle-orm', () => ({
@@ -71,7 +72,7 @@ async function buildApp() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const VALID_BODY = {
-  conversationId: '00000000-0000-0000-0000-000000000001',
+  conversationId: '550e8400-e29b-41d4-a716-446655440000',
   size: 1024,
   mimeType: 'image/jpeg',
   sha256: 'abc123',
@@ -97,7 +98,6 @@ describe('POST /uploads — issue #226', () => {
   let app: express.Express;
 
   beforeEach(async () => {
-    vi.resetModules();
     vi.clearAllMocks();
     app = await buildApp();
   });
@@ -192,7 +192,6 @@ describe('POST /uploads/:fileId/confirm', () => {
   let app: express.Express;
 
   beforeEach(async () => {
-    vi.resetModules();
     vi.clearAllMocks();
     app = await buildApp();
   });
@@ -254,7 +253,6 @@ describe('Thumbnail handling — issue #230', () => {
   let app: express.Express;
 
   beforeEach(async () => {
-    vi.resetModules();
     vi.clearAllMocks();
     app = await buildApp();
   });
