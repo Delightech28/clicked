@@ -7,61 +7,32 @@
  */
 
 import { Router, type Router as RouterType } from 'express';
-import { createVerify } from 'node:crypto';
 import { eq, count, desc, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
 import { devices, signedPreKeys, oneTimePreKeys } from '../db/schema.js';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
+import { SignedPreKeyEntrySchema, PreKeyEntrySchema, verifyEd25519Signature } from '../lib/keys.js';
 
 export const devicesRouter: RouterType = Router();
 
 devicesRouter.use(requireAuth);
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
-
-const PreKeySchema = z.object({
-  keyId: z.number().int().nonnegative(),
-  publicKey: z.string().min(1, 'publicKey is required'),
-});
+// publicKey and signature fields are validated via the shared key validator
+// (src/lib/keys.ts) enforcing correct base64 and exact byte lengths.
 
 const UploadPreKeysSchema = z.object({
-  signedPreKey: PreKeySchema.extend({
-    signature: z.string().min(1, 'signature is required'),
-  }),
-  oneTimePreKeys: z.array(PreKeySchema).min(1, 'At least one one-time prekey is required'),
+  signedPreKey: SignedPreKeyEntrySchema,
+  oneTimePreKeys: z.array(PreKeyEntrySchema).min(1, 'At least one one-time prekey is required'),
 });
 
 /** Maximum number of stored one-time prekeys per device. */
 const OTP_CAP = 200;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Verifies an Ed25519 signature over `publicKey` (raw bytes, decoded from base64)
- * using `identityPublicKey` (base64-encoded SubjectPublicKeyInfo DER, as stored in
- * the devices table).
- *
- * Returns true on valid, false on invalid or unrecognisable key format.
- */
-function verifySignedPreKey(
-  identityPublicKeyB64: string,
-  publicKeyB64: string,
-  signatureB64: string,
-): boolean {
-  try {
-    const identityKeyDer = Buffer.from(identityPublicKeyB64, 'base64');
-    const publicKeyBytes = Buffer.from(publicKeyB64, 'base64');
-    const signatureBytes = Buffer.from(signatureB64, 'base64');
-
-    const verifier = createVerify('Ed25519');
-    verifier.update(publicKeyBytes);
-    return verifier.verify({ key: identityKeyDer, format: 'der', type: 'spki' }, signatureBytes);
-  } catch {
-    return false;
-  }
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Signature verification delegated to shared verifyEd25519Signature in src/lib/keys.ts.
 
 // ─── GET /devices ─────────────────────────────────────────────────────────────
 
@@ -122,7 +93,7 @@ devicesRouter.post('/:id/prekeys', validate(UploadPreKeysSchema), async (req: Au
   >;
 
   // Validate the signed prekey signature against the device identity key.
-  const sigValid = verifySignedPreKey(
+  const sigValid = verifyEd25519Signature(
     device.identityPublicKey,
     signedPreKey.publicKey,
     signedPreKey.signature,
